@@ -18,12 +18,30 @@ model User {
   firstName   String?
   lastName    String?
   isAdmin     Boolean  @default(false)
+  balance     Int      @default(0)  // ⭐ звёзды на балансе
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
   sentGifts     GiftLog[] @relation("GiftSender")
   receivedGifts GiftLog[] @relation("GiftRecipient")
+  transactions  Transaction[]
 
+  @@schema("gifts")
+}
+
+model Transaction {
+  id          String   @id @default(cuid())
+  userId      String
+  type        String   // "give", "transfer_in", "transfer_out", "withdraw", "sendgift_cost"
+  amount      Int      // может быть отрицательным
+  balanceAfter Int
+  note        String?
+  createdAt   DateTime @default(now())
+
+  user        User     @relation(fields: [userId], references: [tgId], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([createdAt])
   @@schema("gifts")
 }
 

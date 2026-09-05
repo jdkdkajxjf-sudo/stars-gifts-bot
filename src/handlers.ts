@@ -20,6 +20,30 @@ import type { TgCallbackQuery, TgMessage, TgUpdate, TgUser } from './types'
 const ADMIN_USERNAME = (process.env.ADMIN_USERNAME || 'xyz').toLowerCase()
 const SYNC_INTERVAL_MS = 60 * 60 * 1000  // 1 час — авто-синк gifts
 
+// Gifts IDs — протестированы на AltGram
+const GIFT_IDS_15 = ['9000000000000001', '9000000000000006']
+const GIFT_IDS_25 = ['9000000000000007', '9000000000000028', '9000000000000030']
+const GIFT_IDS_50 = ['9000000000000005', '9000000000000008', '9000000000000009', '9000000000000013', '9000000000000033', '9000000000000041']
+const GIFT_IDS_75 = ['9000000000000031']
+const GIFT_IDS_100 = ['9000000000000010', '9000000000000011', '9000000000000012', '9000000000000036', '9000000000000039']
+const GIFT_IDS_500 = ['9000000000000029', '9000000000000035', '9000000000000040']
+const GIFT_IDS_666 = ['9000000000000042']  // CURRENTLY UNAVAILABLE (sold out)
+const GIFT_IDS_1000 = ['9000000000000037'] // CURRENTLY UNAVAILABLE (sold out)
+
+function getGiftIdsForAmount(amount: number): string[] | null {
+  switch (amount) {
+    case 15: return GIFT_IDS_15
+    case 25: return GIFT_IDS_25
+    case 50: return GIFT_IDS_50
+    case 75: return GIFT_IDS_75
+    case 100: return GIFT_IDS_100
+    case 500: return GIFT_IDS_500
+    case 666: return GIFT_IDS_666
+    case 1000: return GIFT_IDS_1000
+    default: return null
+  }
+}
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 async function send(
@@ -123,6 +147,20 @@ async function handleTextMessage(msg: TgMessage) {
     case '/help':
       await sendHelp(msg, user)
       break
+    case '/balance':
+    case '/bal':
+      await handleBalance(msg, user)
+      break
+    case '/give':
+      await handleGive(msg, user, parts[1], parts[2])
+      break
+    case '/transfer':
+    case '/pay':
+      await handleTransfer(msg, user, parts[1], parts[2])
+      break
+    case '/withdraw':
+      await handleWithdraw(msg, user, parts[1])
+      break
     case '/sendgift':
     case '/gift':
       await handleSendGift(msg, user, parts.slice(1))
@@ -143,6 +181,9 @@ async function handleTextMessage(msg: TgMessage) {
     case '/top':
       await handleTop(msg, user)
       break
+    case '/toprichest':
+      await handleTopRichest(msg, user)
+      break
     case '/listusers':
       await handleListUsers(msg, user)
       break
@@ -157,12 +198,13 @@ async function handleTextMessage(msg: TgMessage) {
 /* Welcome + help                                                      */
 /* ------------------------------------------------------------------ */
 
-async function sendWelcome(msg: TgMessage, user: { username: string | null; firstName: string | null; isAdmin: boolean }) {
+async function sendWelcome(msg: TgMessage, user: { username: string | null; firstName: string | null; isAdmin: boolean; balance: number }) {
   const kb: TgInlineKeyboardMarkup = {
     inline_keyboard: [
       [{ text: '🎁 Доступные gifts', callback_data: 'gifts' }],
+      [{ text: '💰 Мой баланс', callback_data: 'balance' }, { text: '💸 Вывести', callback_data: 'withdraw_menu' }],
       [{ text: '📊 Статистика', callback_data: 'stats' }, { text: '📋 Лог', callback_data: 'log' }],
-      [{ text: '🔄 Синк gifts', callback_data: 'sync' }, { text: '🏆 Топ', callback_data: 'top' }],
+      [{ text: '🔄 Синк gifts', callback_data: 'sync' }, { text: '🏆 Топ получателей', callback_data: 'top' }],
     ],
   }
   await send(
@@ -170,17 +212,18 @@ async function sendWelcome(msg: TgMessage, user: { username: string | null; firs
     [
       `👋 Привет, **${user.firstName || user.username || 'друг'}**!`,
       ``,
-      `🎁 **Stars Gifts Bot** — выдача подарков`,
+      `🎁 **Stars Gifts Bot** — выдача подарков + экономика`,
+      ``,
+      `💰 **Твой баланс: ${user.balance}⭐**`,
       ``,
       `**Команды:**`,
-      `• /sendgift @user 500 1 — отправить gift`,
-      `• /gifts — список доступных gifts`,
-      `• /sync — обновить список gifts`,
-      `• /log — последние отправки`,
-      `• /stats — статистика`,
-      `• /top — топ получателей`,
+      `• /balance — баланс`,
+      `• /withdraw 500 — вывести звёзды (gift)`,
+      `• /transfer @user 100 — перевести юзеру`,
+      `• /sendgift @user 500 1 — отправить gift (админ)`,
+      `• /gifts — список gifts`,
       ``,
-      user.isAdmin ? `👑 Ты админ — можешь отправлять gifts` : `⚠️ Только админ может отправлять gifts`,
+      user.isAdmin ? `👑 Ты админ — можешь отправлять gifts и начислять звёзды` : `ℹ️ Юзеры могут переводить и выводить звёзды`,
     ].join('\n'),
     kb
   )
@@ -190,27 +233,32 @@ async function sendHelp(msg: TgMessage, user: { isAdmin: boolean }) {
   const text = [
     `📖 **Помощь**`,
     ``,
-    `**Команды:**`,
-    `• /sendgift @user <amount> <count> — отправить gift`,
+    `**Экономика (все):**`,
+    `• /balance — твой баланс звёзд`,
+    `• /transfer @user <amount> — перевести юзеру`,
+    `  Пример: \`/transfer @rasta 100\``,
+    `• /withdraw <amount> — вывести звёзды (получишь gift)`,
+    `  Доступные суммы: 50, 100, 500⭐`,
+    `  Пример: \`/withdraw 100\` → gift на 100⭐`,
+    ``,
+    `**Gifts (админ):**`,
+    `• /sendgift @user <amount> <count> — отправить gift юзеру`,
     `  Пример: \`/sendgift @rasta 500 1\``,
-    `  Пример: \`/sendgift @xyz 1000 3\``,
-    `  Пример: \`/sendgift 1780243895 666 1\` (по tgId)`,
-    `• /gifts — список всех доступных gifts`,
-    `• /sync — принудительно обновить gifts из AltGram`,
-    `• /log — последние 10 отправок`,
-    `• /stats — статистика отправок`,
-    `• /top — топ получателей по сумме`,
-    `• /listusers — список юзеров в БД`,
+    `• /gifts — список всех gifts`,
+    `• /sync — обновить gifts из AltGram`,
     ``,
-    `**Доступные суммы:**`,
-    `15, 25, 50, 75, 100, 500, 666 👹, 1000⭐`,
+    `**Инфо:**`,
+    `• /log — последние отправки`,
+    `• /stats — статистика`,
+    `• /top — топ получателей gifts`,
+    `• /toprichest — топ по балансу`,
+    `• /listusers — юзеры в БД (админ)`,
     ``,
-    `**Авто-обновление:** каждые ${SYNC_INTERVAL_MS / 60000} мин.`,
+    `**Суммы gifts:** 15, 25, 50, 75, 100, 500⭐ (666/1000 недоступны)`,
   ]
   if (user.isAdmin) {
-    text.push(``, `👑 Ты админ — полный доступ`)
-  } else {
-    text.push(``, `⚠️ Только админ может отправлять gifts`)
+    text.push(``, `**Админ:**`, `• /give @user <amount> — начислить звёзды`)
+    text.push(`• /sendgift — отправить gift любому юзеру`)
   }
   await send(msg.chat.id, text.join('\n'))
 }
@@ -617,6 +665,319 @@ async function handleListUsers(msg: TgMessage, user: { isAdmin: boolean }) {
 }
 
 /* ------------------------------------------------------------------ */
+/* /balance — показать баланс                                          */
+/* ------------------------------------------------------------------ */
+
+async function handleBalance(msg: TgMessage, user: { balance: number; username: string | null; firstName: string | null }) {
+  await send(msg.chat.id,
+    [
+      `💰 **Твой баланс**`,
+      ``,
+      `⭐ Звёзды: **${user.balance}⭐**`,
+      ``,
+      `**Что можно делать:**`,
+      `• /transfer @user <amount> — перевести юзеру`,
+      `• /withdraw <amount> — вывести (получишь gift)`,
+    ].join('\n')
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* /give — админ начисляет звёзды юзеру                                */
+/* ------------------------------------------------------------------ */
+
+async function handleGive(
+  msg: TgMessage,
+  user: { tgId: string; username: string | null; firstName: string | null; isAdmin: boolean },
+  targetArg?: string,
+  amountArg?: string
+) {
+  if (!user.isAdmin) {
+    await send(msg.chat.id, '🚫 Только админ.')
+    return
+  }
+  if (!targetArg || !targetArg.startsWith('@')) {
+    await send(msg.chat.id, '⚠️ Использование: `/give @user 100`')
+    return
+  }
+  const targetUsername = targetArg.slice(1).toLowerCase()
+  const amount = parseInt(amountArg ?? '')
+  if (isNaN(amount) || amount <= 0) {
+    await send(msg.chat.id, '⚠️ Укажи сумму: `/give @user 100`')
+    return
+  }
+  const target = await db.user.findFirst({ where: { username: targetUsername } })
+  if (!target) {
+    await send(msg.chat.id, `❌ @${targetUsername} не найден. Юзер должен запустить /start.`)
+    return
+  }
+  try {
+    const updated = await db.$transaction(async (tx) => {
+      const u = await tx.user.update({
+        where: { id: target.id },
+        data: { balance: { increment: amount } },
+      })
+      await tx.transaction.create({
+        data: {
+          userId: target.tgId,
+          type: 'give',
+          amount,
+          balanceAfter: u.balance,
+          note: `Начисление от @${user.username ?? 'admin'}`,
+        },
+      })
+      return u
+    })
+    await send(msg.chat.id, `✅ @${targetUsername} +${amount}⭐. Баланс: ${updated.balance}⭐`)
+    try {
+      const senderName = user.username ? `@${user.username}` : (user.firstName || 'админ')
+      await send(target.tgId, `🎁 Админ ${senderName} начислил вам ${amount}⭐!\n\nБаланс: ${updated.balance}⭐`)
+    } catch {}
+  } catch (e) {
+    await send(msg.chat.id, `❌ Ошибка: ${e instanceof Error ? e.message : String(e)}`)
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* /transfer — перевод звёзд другому юзеру                              */
+/* ------------------------------------------------------------------ */
+
+async function handleTransfer(
+  msg: TgMessage,
+  user: { id: string; tgId: string; username: string | null; firstName: string | null; balance: number },
+  targetArg?: string,
+  amountArg?: string
+) {
+  if (!targetArg || !targetArg.startsWith('@')) {
+    await send(msg.chat.id, '⚠️ Использование: `/transfer @user 100`')
+    return
+  }
+  const targetUsername = targetArg.slice(1).toLowerCase()
+  if (targetUsername === (user.username ?? '')) {
+    await send(msg.chat.id, '⚠️ Нельзя перевести себе!')
+    return
+  }
+  const amount = parseInt(amountArg ?? '')
+  if (isNaN(amount) || amount <= 0) {
+    await send(msg.chat.id, '⚠️ Укажи сумму: `/transfer @user 100`')
+    return
+  }
+  if (user.balance < amount) {
+    await send(msg.chat.id, `❌ Недостаточно звёзд. Баланс: ${user.balance}⭐`)
+    return
+  }
+  const target = await db.user.findFirst({ where: { username: targetUsername } })
+  if (!target) {
+    await send(msg.chat.id, `❌ @${targetUsername} не найден. Юзер должен запустить /start.`)
+    return
+  }
+
+  try {
+    // Атомарный перевод в транзакции
+    const result = await db.$transaction(async (tx) => {
+      // Списываем у отправителя
+      const senderFresh = await tx.user.findUnique({ where: { id: user.id } })
+      if (!senderFresh) throw new Error('sender_missing')
+      if (senderFresh.balance < amount) throw new Error('insufficient_balance')
+      const senderUpdated = await tx.user.update({
+        where: { id: user.id },
+        data: { balance: { decrement: amount } },
+      })
+      await tx.transaction.create({
+        data: {
+          userId: user.tgId,
+          type: 'transfer_out',
+          amount: -amount,
+          balanceAfter: senderUpdated.balance,
+          note: `Перевод @${targetUsername}`,
+        },
+      })
+
+      // Начисляем получателю
+      const recipientUpdated = await tx.user.update({
+        where: { id: target.id },
+        data: { balance: { increment: amount } },
+      })
+      await tx.transaction.create({
+        data: {
+          userId: target.tgId,
+          type: 'transfer_in',
+          amount,
+          balanceAfter: recipientUpdated.balance,
+          note: `От @${user.username ?? user.tgId}`,
+        },
+      })
+      return { sender: senderUpdated, recipient: recipientUpdated }
+    })
+
+    await send(
+      msg.chat.id,
+      [
+        `✅ **Перевод выполнен!**`,
+        `👤 Кому: @${targetUsername}`,
+        `💰 Сумма: ${amount}⭐`,
+        `💼 Ваш баланс: ${result.sender.balance}⭐`,
+      ].join('\n')
+    )
+    try {
+      const senderName = user.username ? `@${user.username}` : (user.firstName || 'аноним')
+      await send(
+        target.tgId,
+        [
+          `💸 Вам перевод!`,
+          ``,
+          `👤 От: ${senderName}`,
+          `💰 Сумма: ${amount}⭐`,
+          `💼 Баланс: ${result.recipient.balance}⭐`,
+        ].join('\n')
+      )
+    } catch {}
+  } catch (e) {
+    const err = String(e)
+    if (err.includes('insufficient_balance')) {
+      await send(msg.chat.id, '❌ Недостаточно звёзд. Попробуйте ещё раз.')
+    } else {
+      await send(msg.chat.id, `❌ Ошибка перевода: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* /withdraw — вывести звёзды (получить gift)                          */
+/* ------------------------------------------------------------------ */
+
+const VALID_WITHDRAW_AMOUNTS = [50, 100, 500]  // 666/1000 недоступны, 15/25/75 слишком мелкие
+
+async function handleWithdraw(
+  msg: TgMessage,
+  user: { id: string; tgId: string; username: string | null; firstName: string | null; balance: number },
+  amountArg?: string
+) {
+  const amount = parseInt(amountArg ?? '')
+  if (!amount || !VALID_WITHDRAW_AMOUNTS.includes(amount)) {
+    const kb: TgInlineKeyboardMarkup = {
+      inline_keyboard: [
+        [{ text: '💸 50⭐', callback_data: 'withdraw:50' }, { text: '💸 100⭐', callback_data: 'withdraw:100' }],
+        [{ text: '💸 500⭐', callback_data: 'withdraw:500' }],
+      ],
+    }
+    await send(msg.chat.id,
+      [
+        `💸 **Вывод звёзд через Telegram Gift**`,
+        ``,
+        `Подарок придёт сразу!`,
+        `Доступные суммы: ${VALID_WITHDRAW_AMOUNTS.join(', ')}⭐`,
+      ].join('\n'),
+      kb
+    )
+    return
+  }
+
+  if (user.balance < amount) {
+    await send(msg.chat.id, `❌ Недостаточно звёзд. Баланс: ${user.balance}⭐`)
+    return
+  }
+
+  // Атомарное списание
+  try {
+    await db.$transaction(async (tx) => {
+      const fresh = await tx.user.findUnique({ where: { id: user.id } })
+      if (!fresh) throw new Error('user_missing')
+      if (fresh.balance < amount) throw new Error('insufficient_balance')
+      const u = await tx.user.update({
+        where: { id: user.id },
+        data: { balance: { decrement: amount } },
+      })
+      await tx.transaction.create({
+        data: {
+          userId: user.tgId,
+          type: 'withdraw',
+          amount: -amount,
+          balanceAfter: u.balance,
+          note: `Вывод ${amount}⭐ через gift`,
+        },
+      })
+    })
+  } catch (e) {
+    const err = String(e)
+    if (err.includes('insufficient_balance')) {
+      await send(msg.chat.id, '❌ Недостаточно звёзд.')
+      return
+    }
+    await send(msg.chat.id, '❌ Ошибка списания.')
+    return
+  }
+
+  // Отправляем gift
+  const giftIds = getGiftIdsForAmount(amount) ?? []
+  let sentGiftId = ''
+  if (giftIds.length === 0) {
+    // Возврат
+    await db.user.update({ where: { id: user.id }, data: { balance: { increment: amount } } })
+    await send(msg.chat.id, '❌ Нет gifts для этой суммы. Звёзды возвращены.')
+    return
+  }
+
+  let giftSent = false
+  for (const giftId of giftIds) {
+    const res = await altgram.sendGift({
+      user_id: Number(user.tgId),
+      gift_id: giftId,
+    })
+    if (res.ok) {
+      giftSent = true
+      sentGiftId = giftId
+      break
+    }
+  }
+
+  if (giftSent) {
+    await db.giftLog.create({
+      data: {
+        senderTgId: user.tgId,
+        recipientTgId: user.tgId,
+        recipientUsername: user.username,
+        amount,
+        giftId: sentGiftId,
+        count: 1,
+        successCount: 1,
+        failedCount: 0,
+        status: 'success',
+        note: 'Вывод через /withdraw',
+      },
+    })
+    await send(msg.chat.id, `✅ **Вывод выполнен!**\n🎁 Подарок на ${amount}⭐ отправлен!`)
+  } else {
+    // Возврат звёзд
+    await db.user.update({ where: { id: user.id }, data: { balance: { increment: amount } } })
+    await send(msg.chat.id, '❌ Не удалось отправить подарок. Звёзды возвращены.')
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* /toprichest — топ по балансу                                        */
+/* ------------------------------------------------------------------ */
+
+async function handleTopRichest(msg: TgMessage, user: { isAdmin: boolean }) {
+  const users = await db.user.findMany({
+    where: { balance: { gt: 0 } },
+    orderBy: { balance: 'desc' },
+    take: 10,
+    select: { username: true, firstName: true, tgId: true, balance: true },
+  })
+  if (users.length === 0) {
+    await send(msg.chat.id, '📭 Нет юзеров с балансом > 0.')
+    return
+  }
+  const lines = users.map((u, i) => {
+    const name = u.username ? `@${u.username}` : (u.firstName || `id:${u.tgId}`)
+    const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`
+    return `${medal} ${name} — ${u.balance}⭐`
+  })
+  await send(msg.chat.id, `🏆 **Топ-10 богачей:**\n\n${lines.join('\n')}`)
+}
+
+/* ------------------------------------------------------------------ */
 /* Callback handler                                                    */
 /* ------------------------------------------------------------------ */
 
@@ -631,7 +992,8 @@ async function handleCallbackQuery(cq: TgCallbackQuery) {
 
     const user = await upsertUser(from)
     let act = data
-    if (data.includes(':')) [act] = data.split(':')
+    let arg = ''
+    if (data.includes(':')) [act, arg] = data.split(':')
 
     console.log(`[callback] data="${data}" → act="${act}"`)
 
@@ -658,6 +1020,16 @@ async function handleCallbackQuery(cq: TgCallbackQuery) {
     } else if (act === 'top') {
       try { await altgram.answerCallbackQuery({ callback_query_id: cq.id, text: '🏆' }) } catch {}
       await handleTop(fakeMsg, user)
+    } else if (act === 'balance') {
+      try { await altgram.answerCallbackQuery({ callback_query_id: cq.id, text: '💰' }) } catch {}
+      await handleBalance(fakeMsg, user)
+    } else if (act === 'withdraw_menu') {
+      try { await altgram.answerCallbackQuery({ callback_query_id: cq.id, text: '💸' }) } catch {}
+      await handleWithdraw(fakeMsg, user, '')
+    } else if (act === 'withdraw') {
+      const amount = parseInt(arg)
+      try { await altgram.answerCallbackQuery({ callback_query_id: cq.id, text: `💸 ${amount}⭐` }) } catch {}
+      await handleWithdraw(fakeMsg, user, String(amount))
     } else {
       try { await altgram.answerCallbackQuery({ callback_query_id: cq.id, text: 'Ок' }) } catch {}
     }

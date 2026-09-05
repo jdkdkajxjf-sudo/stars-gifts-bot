@@ -65,12 +65,17 @@ async function main() {
 
   await altgram.setMyCommands([
     { command: 'start', description: 'Запустить бота' },
-    { command: 'sendgift', description: 'Отправить gift: /sendgift @user 500 1' },
+    { command: 'balance', description: 'Мой баланс звёзд' },
+    { command: 'transfer', description: 'Перевести: /transfer @user 100' },
+    { command: 'withdraw', description: 'Вывести: /withdraw 100' },
+    { command: 'sendgift', description: '[админ] Отправить gift' },
+    { command: 'give', description: '[админ] Начислить: /give @user 100' },
     { command: 'gifts', description: 'Список доступных gifts' },
     { command: 'sync', description: 'Обновить gifts из AltGram' },
     { command: 'log', description: 'Последние отправки' },
     { command: 'stats', description: 'Статистика' },
-    { command: 'top', description: 'Топ получателей' },
+    { command: 'top', description: 'Топ получателей gifts' },
+    { command: 'toprichest', description: 'Топ по балансу' },
     { command: 'listusers', description: '[админ] Юзеры в БД' },
     { command: 'help', description: 'Помощь' },
   ])
