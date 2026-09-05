@@ -7,7 +7,7 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
+  url      = "postgresql://postgres.izxodeqeofxkyeluymvz:wp8dZOTICPfYBCBQ@aws-0-eu-central-1.pooler.supabase.com:5432/postgres"
   schemas  = ["gifts"]
 }
 
