@@ -277,17 +277,120 @@ async function handleSendGift(
     return
   }
 
-  const targetArg = args[0] ?? ''
-  const amountArg = args[1]
-  const countArg = args[2] || '1'
+  // Парсим флаги: --anon, --msg "текст", --silent, --random, --all, --multi, --dry-run, --min, --max
+  let anonymous = false
+  let giftText: string | null = null
+  let silentNotify = false
+  let randomMode = false
+  let allMode = false
+  let dryRun = false
+  let minAmount = 0
+  let maxAmount = 0
+  let multiAmounts: number[] = []
+  const positionalArgs: string[] = []
 
-  // Убираем @ если есть
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]
+    if (a === '--anon' || a === '-a') {
+      anonymous = true
+    } else if (a === '--silent' || a === '-s') {
+      silentNotify = true
+    } else if (a === '--random' || a === '-r') {
+      randomMode = true
+    } else if (a === '--all') {
+      allMode = true
+    } else if (a === '--dry-run' || a === '-d') {
+      dryRun = true
+    } else if (a === '--min') {
+      i++
+      minAmount = parseInt(args[i] ?? '0') || 0
+    } else if (a === '--max') {
+      i++
+      maxAmount = parseInt(args[i] ?? '0') || 0
+    } else if (a === '--multi') {
+      i++
+      const amountsStr = args[i] ?? ''
+      multiAmounts = amountsStr.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n) && n > 0)
+    } else if (a === '--msg' || a === '-m') {
+      i++
+      const msgParts: string[] = []
+      while (i < args.length && !args[i].startsWith('--') && !args[i].startsWith('-')) {
+        msgParts.push(args[i])
+        i++
+      }
+      i--
+      giftText = msgParts.join(' ').replace(/^["']|["']$/g, '')
+    } else {
+      positionalArgs.push(a)
+    }
+  }
+
+  const targetArg = positionalArgs[0] ?? ''
+  const amountArg = positionalArgs[1]
+  const countArg = positionalArgs[2] || '1'
+
   const rawTarget = targetArg.replace(/^@/, '').trim()
   if (!rawTarget) {
-    await send(msg.chat.id, '⚠️ Использование:\n`/sendgift @user 500 1`\n\nЦены: 15, 25, 50, 75, 100, 500, 666, 1000⭐')
+    await send(
+      msg.chat.id,
+      [
+        '⚠️ **Использование:**',
+        '',
+        '**Базовая отправка:**',
+        '`/sendgift @user 500 1` — отправить 1 gift на 500⭐',
+        '',
+        '**Фишки:**',
+        '`/sendgift @user 500 1 --anon` — 🕵️ анонимно (получатель не знает кто)',
+        '`/sendgift @user 500 1 --msg "С ДР!"` — 📝 с текстом в gift',
+        '`/sendgift @user 500 1 --silent` — 🤫 без уведомления в ЛС',
+        '`/sendgift @user --random 3` — 🎲 3 случайных gifts',
+        '`/sendgift @user --random 5 --min 50 --max 500` — 🎲 5 от 50 до 500⭐',
+        '`/sendgift @user --multi 50,100,500` — 📦 gifts разных номиналов',
+        '`/sendgift @user --all` — 🎉 ВСЕ доступные gifts (по 1 каждого)',
+        '`/sendgift @user 500 1 --dry-run` — 🔍 предпросмотр (без отправки)',
+        '',
+        '**Все флаги (комбинируются):**',
+        '• `--anon` / `-a` — анонимно',
+        '• `--msg "текст"` / `-m` — текст к gift',
+        '• `--silent` / `-s` — без уведомления',
+        '• `--dry-run` / `-d` — предпросмотр',
+        '• `--random` / `-r` — случайный gift',
+        '• `--multi 50,100` — несколько номиналов',
+        '• `--all` — все gifts',
+        '• `--min N` / `--max N` — диапазон для random',
+        '',
+        '**Цены:** 15, 25, 50, 75, 100, 500⭐ (666/1000 недоступны)',
+      ].join('\n')
+    )
     return
   }
 
+  // Найти юзера
+  const target = await findOrCreateTarget(rawTarget, msg)
+  if (!target) return
+
+  const opts = { anonymous, giftText, silentNotify, dryRun }
+
+  // Режим --all: отправить все доступные gifts
+  if (allMode) {
+    await handleSendAllGifts(msg, user, target, opts)
+    return
+  }
+
+  // Режим --random: случайные gifts
+  if (randomMode) {
+    const count = parseInt(amountArg ?? '1') || 1
+    await handleSendRandomGift(msg, user, target, count, { ...opts, minAmount, maxAmount })
+    return
+  }
+
+  // Режим --multi: несколько номиналов
+  if (multiAmounts.length > 0) {
+    await handleSendMultiGifts(msg, user, target, multiAmounts, opts)
+    return
+  }
+
+  // Обычный режим
   const amount = parseInt(amountArg ?? '')
   const count = Math.min(Math.max(parseInt(countArg) || 1, 1), 50)
 
@@ -296,41 +399,9 @@ async function handleSendGift(
     return
   }
 
-  // Поиск юзера: tgId (если число) или username (lowercase)
-  let target: { tgId: string; username: string | null; firstName: string | null } | null = null
-
-  if (/^\d+$/.test(rawTarget)) {
-    target = await db.user.findUnique({
-      where: { tgId: rawTarget },
-      select: { tgId: true, username: true, firstName: true },
-    })
-    if (!target) {
-      try {
-        target = await db.user.create({
-          data: { tgId: rawTarget, username: null, firstName: null },
-        })
-        await send(msg.chat.id, `ℹ️ Юзер с tgId \`${rawTarget}\` добавлен в БД.`)
-      } catch (e) {
-        await send(msg.chat.id, `❌ Не удалось создать юзера с tgId \`${rawTarget}\`.`)
-        return
-      }
-    }
-  } else {
-    target = await db.user.findFirst({
-      where: { username: rawTarget.toLowerCase() },
-      select: { tgId: true, username: true, firstName: true },
-    })
-  }
-
-  if (!target) {
-    await send(msg.chat.id, `❌ Юзер \`${rawTarget}\` не найден в БД.\n\nЮзер должен нажать /start боту.`)
-    return
-  }
-
-  // Найти giftId в БД по сумме
   const availableGift = await db.availableGift.findFirst({
     where: { starCount: amount, isActive: true, isSoldOut: false },
-    orderBy: { remainingCount: 'asc' },  // сначала те что меньше осталось (limited)
+    orderBy: { remainingCount: 'asc' },
   })
 
   if (!availableGift) {
@@ -339,7 +410,8 @@ async function handleSendGift(
       [
         `❌ Нет gifts на ${amount}⭐.`,
         ``,
-        `**Доступные суммы:** 15, 25, 50, 75, 100, 500, 666, 1000⭐`,
+        `**Доступные суммы:** 15, 25, 50, 75, 100, 500⭐`,
+        `(666 и 1000 временно недоступны)`,
         `Посмотри: /gifts`,
       ].join('\n')
     )
@@ -347,14 +419,35 @@ async function handleSendGift(
   }
 
   const displayName = target.username ? `@${target.username}` : `tg:${target.tgId}`
-  await send(msg.chat.id, `⏳ Отправляю ${count} gifts по ${amount}⭐ юзеру ${displayName}...`)
+  const flagsInfo: string[] = []
+  if (anonymous) flagsInfo.push('🕵️ анонимно')
+  if (giftText) flagsInfo.push(`📝 "${giftText}"`)
+  if (silentNotify) flagsInfo.push('🤫 без уведомления')
+  if (dryRun) flagsInfo.push('🔍 dry-run')
+
+  if (dryRun) {
+    await send(msg.chat.id,
+      [
+        `🔍 **Предпросмотр (dry-run):**`,
+        `👤 Юзер: ${displayName}`,
+        `💰 ${amount}⭐ × ${count}`,
+        `🎁 Gift ID: ${availableGift.giftId}`,
+        ...(flagsInfo.length > 0 ? [`🏷 Флаги: ${flagsInfo.join(', ')}`] : []),
+        ``,
+        `⚠️ Ничего не отправлено. Убери --dry-run для реальной отправки.`,
+      ].join('\n')
+    )
+    return
+  }
+
+  const flagsText = flagsInfo.length > 0 ? ` (${flagsInfo.join(', ')})` : ''
+  await send(msg.chat.id, `⏳ Отправляю ${count} gifts по ${amount}⭐ юзеру ${displayName}${flagsText}...`)
 
   // Отправляем gifts
   let successCount = 0
   let failedCount = 0
 
   for (let i = 0; i < count; i++) {
-    // Находим giftId (можно менять если несколько вариантов)
     const gift = await db.availableGift.findFirst({
       where: { starCount: amount, isActive: true, isSoldOut: false },
     })
@@ -363,10 +456,15 @@ async function handleSendGift(
       continue
     }
 
-    const res = await altgram.sendGift({
+    const giftParams: { user_id: number; gift_id: string; text?: string } = {
       user_id: Number(target.tgId),
       gift_id: gift.giftId,
-    })
+    }
+    if (!anonymous && giftText) {
+      giftParams.text = giftText
+    }
+
+    const res = await altgram.sendGift(giftParams)
 
     if (res.ok) {
       successCount++
@@ -376,7 +474,7 @@ async function handleSendGift(
     }
   }
 
-  // Сохраняем в лог
+  // Лог в БД
   await db.giftLog.create({
     data: {
       senderTgId: user.tgId,
@@ -388,6 +486,7 @@ async function handleSendGift(
       successCount,
       failedCount,
       status: successCount === count ? 'success' : successCount === 0 ? 'failed' : 'partial',
+      note: flagsInfo.length > 0 ? flagsInfo.join(', ') : null,
     },
   })
 
@@ -399,17 +498,326 @@ async function handleSendGift(
       `💰 ${amount}⭐ × ${count}`,
       `✅ Отправлено: ${successCount}`,
       `❌ Не удалось: ${failedCount}`,
+      ...(flagsInfo.length > 0 ? [`🏷 Флаги: ${flagsInfo.join(', ')}`] : []),
     ].join('\n')
   )
 
-  // Уведомить получателя
-  if (successCount > 0) {
+  // Уведомить получателя (если не --silent)
+  if (successCount > 0 && !silentNotify) {
     try {
-      const senderName = user.username ? `@${user.username}` : (user.firstName || 'админ')
-      await send(
-        target.tgId,
-        `🎁 Вам отправлено ${successCount} gifts по ${amount}⭐ от ${senderName}!`
-      )
+      const senderName = anonymous ? 'аноним' : (user.username ? `@${user.username}` : (user.firstName || 'админ'))
+      let notifyText = `🎁 Вам отправлено ${successCount} gifts по ${amount}⭐ от ${senderName}!`
+      if (giftText && !anonymous) {
+        notifyText += `\n\n💬 "${giftText}"`
+      }
+      await send(target.tgId, notifyText)
+    } catch {}
+  }
+}
+
+// Вспомогательная: найти или создать юзера
+async function findOrCreateTarget(rawTarget: string, msg: TgMessage): Promise<{ tgId: string; username: string | null; firstName: string | null } | null> {
+  let target: { tgId: string; username: string | null; firstName: string | null } | null = null
+
+  if (/^\d+$/.test(rawTarget)) {
+    target = await db.user.findUnique({
+      where: { tgId: rawTarget },
+      select: { tgId: true, username: true, firstName: true },
+    })
+    if (!target) {
+      try {
+        target = await db.user.create({ data: { tgId: rawTarget, username: null, firstName: null } })
+        await send(msg.chat.id, `ℹ️ Юзер с tgId \`${rawTarget}\` добавлен в БД.`)
+      } catch {
+        await send(msg.chat.id, `❌ Не удалось создать юзера с tgId \`${rawTarget}\`.`)
+        return null
+      }
+    }
+  } else {
+    target = await db.user.findFirst({
+      where: { username: rawTarget.toLowerCase() },
+      select: { tgId: true, username: true, firstName: true },
+    })
+  }
+
+  if (!target) {
+    await send(msg.chat.id, `❌ Юзер \`${rawTarget}\` не найден в БД.\n\nЮзер должен нажать /start боту.`)
+    return null
+  }
+  return target
+}
+
+// Вспомогательная: отправить gifts с флагами (возвращает sent/failed)
+async function sendGiftsWithFlags(
+  tgId: string,
+  amount: number,
+  count: number,
+  opts: { anonymous: boolean; giftText: string | null }
+): Promise<{ sent: number; failed: number }> {
+  const giftIds = getGiftIdsForAmount(amount) ?? []
+  if (giftIds.length === 0) return { sent: 0, failed: count }
+
+  let sent = 0
+  let failed = 0
+
+  for (let i = 0; i < count; i++) {
+    let giftSent = false
+    for (const giftId of giftIds) {
+      const giftParams: { user_id: number; gift_id: string; text?: string } = {
+        user_id: Number(tgId),
+        gift_id: giftId,
+      }
+      if (!opts.anonymous && opts.giftText) {
+        giftParams.text = opts.giftText
+      }
+      const res = await altgram.sendGift(giftParams)
+      if (res.ok) {
+        giftSent = true
+        break
+      }
+    }
+    if (giftSent) sent++
+    else failed++
+  }
+
+  return { sent, failed }
+}
+
+// Вспомогательная: собрать инфо о флагах
+function buildFlagsInfo(opts: { anonymous: boolean; giftText: string | null; silentNotify: boolean; dryRun: boolean }): string[] {
+  const flags: string[] = []
+  if (opts.anonymous) flags.push('🕵️ анонимно')
+  if (opts.giftText) flags.push(`📝 "${opts.giftText}"`)
+  if (opts.silentNotify) flags.push('🤫 без уведомления')
+  if (opts.dryRun) flags.push('🔍 dry-run')
+  return flags
+}
+
+// --all: отправить все доступные gifts (по 1 каждого номинала)
+async function handleSendAllGifts(
+  msg: TgMessage,
+  user: { tgId: string; username: string | null; firstName: string | null },
+  target: { tgId: string; username: string | null; firstName: string | null },
+  opts: { anonymous: boolean; giftText: string | null; silentNotify: boolean; dryRun: boolean }
+) {
+  const gifts = await db.availableGift.findMany({
+    where: { isActive: true, isSoldOut: false },
+    orderBy: { starCount: 'asc' },
+    distinct: ['starCount'],
+  })
+
+  if (gifts.length === 0) {
+    await send(msg.chat.id, '❌ Нет доступных gifts.')
+    return
+  }
+
+  const displayName = target.username ? `@${target.username}` : `tg:${target.tgId}`
+
+  if (opts.dryRun) {
+    const lines = gifts.map(g => `• ${g.starCount}⭐ (id: ${g.giftId})`)
+    await send(msg.chat.id,
+      [
+        `🔍 **Предпросмотр --all:**`,
+        `👤 Юзер: ${displayName}`,
+        ``,
+        `Будет отправлено ${gifts.length} gifts:`,
+        ...lines,
+        ``,
+        `⚠️ Убери --dry-run для отправки.`,
+      ].join('\n')
+    )
+    return
+  }
+
+  await send(msg.chat.id, `⏳ Отправляю ВСЕ ${gifts.length} gifts юзеру ${displayName}...`)
+
+  let totalSent = 0
+  let totalFailed = 0
+  const details: string[] = []
+
+  for (const gift of gifts) {
+    const result = await sendGiftsWithFlags(target.tgId, gift.starCount, 1, opts)
+    if (result.sent > 0) {
+      totalSent++
+      details.push(`✅ ${gift.starCount}⭐`)
+      // Лог в БД
+      await db.giftLog.create({
+        data: {
+          senderTgId: user.tgId,
+          recipientTgId: target.tgId,
+          recipientUsername: target.username,
+          amount: gift.starCount,
+          giftId: gift.giftId,
+          count: 1,
+          successCount: 1,
+          failedCount: 0,
+          status: 'success',
+          note: '--all',
+        },
+      })
+    } else {
+      totalFailed++
+      details.push(`❌ ${gift.starCount}⭐`)
+    }
+  }
+
+  const flagsInfo = buildFlagsInfo(opts)
+  await send(msg.chat.id,
+    [
+      `🎉 **Результат --all:**`,
+      `👤 Юзер: ${displayName}`,
+      `✅ Отправлено: ${totalSent}/${gifts.length}`,
+      `❌ Не удалось: ${totalFailed}`,
+      ``,
+      ...details,
+      ...(flagsInfo.length > 0 ? [``, `🏷 Флаги: ${flagsInfo.join(', ')}`] : []),
+    ].join('\n')
+  )
+
+  if (totalSent > 0 && !opts.silentNotify) {
+    try {
+      const senderName = opts.anonymous ? 'аноним' : (user.username ? `@${user.username}` : (user.firstName || 'админ'))
+      await send(target.tgId, `🎉 Вам отправлено ${totalSent} разных gifts от ${senderName}!`)
+    } catch {}
+  }
+}
+
+// --random: отправить N случайных gifts
+async function handleSendRandomGift(
+  msg: TgMessage,
+  user: { tgId: string; username: string | null; firstName: string | null },
+  target: { tgId: string; username: string | null; firstName: string | null },
+  count: number,
+  opts: { anonymous: boolean; giftText: string | null; silentNotify: boolean; dryRun: boolean; minAmount: number; maxAmount: number }
+) {
+  let gifts = await db.availableGift.findMany({
+    where: { isActive: true, isSoldOut: false },
+  })
+
+  if (opts.minAmount > 0) gifts = gifts.filter(g => g.starCount >= opts.minAmount)
+  if (opts.maxAmount > 0) gifts = gifts.filter(g => g.starCount <= opts.maxAmount)
+
+  const uniqueAmounts = [...new Set(gifts.map(g => g.starCount))]
+
+  if (uniqueAmounts.length === 0) {
+    await send(msg.chat.id, '❌ Нет gifts в указанном диапазоне.')
+    return
+  }
+
+  const displayName = target.username ? `@${target.username}` : `tg:${target.tgId}`
+
+  if (opts.dryRun) {
+    await send(msg.chat.id,
+      [
+        `🔍 **Предпросмотр --random:**`,
+        `👤 Юзер: ${displayName}`,
+        ``,
+        `Доступные суммы: ${uniqueAmounts.join(', ')}⭐`,
+        `Будет отправлено: ${count} случайных`,
+        ``,
+        `⚠️ Убери --dry-run для отправки.`,
+      ].join('\n')
+    )
+    return
+  }
+
+  await send(msg.chat.id, `🎲 Отправляю ${count} случайных gifts юзеру ${displayName}...`)
+
+  let totalSent = 0
+  let totalFailed = 0
+  const details: string[] = []
+
+  for (let i = 0; i < count; i++) {
+    const randomAmount = uniqueAmounts[Math.floor(Math.random() * uniqueAmounts.length)]
+    const result = await sendGiftsWithFlags(target.tgId, randomAmount, 1, opts)
+    if (result.sent > 0) {
+      totalSent++
+      details.push(`✅ ${randomAmount}⭐`)
+    } else {
+      totalFailed++
+      details.push(`❌ ${randomAmount}⭐`)
+    }
+  }
+
+  const flagsInfo = buildFlagsInfo(opts)
+  await send(msg.chat.id,
+    [
+      `🎲 **Результат --random:**`,
+      `👤 Юзер: ${displayName}`,
+      `✅ Отправлено: ${totalSent}/${count}`,
+      `❌ Не удалось: ${totalFailed}`,
+      ``,
+      ...details,
+      ...(flagsInfo.length > 0 ? [``, `🏷 Флаги: ${flagsInfo.join(', ')}`] : []),
+    ].join('\n')
+  )
+
+  if (totalSent > 0 && !opts.silentNotify) {
+    try {
+      const senderName = opts.anonymous ? 'аноним' : (user.username ? `@${user.username}` : (user.firstName || 'админ'))
+      await send(target.tgId, `🎲 Вам отправлено ${totalSent} случайных gifts от ${senderName}!`)
+    } catch {}
+  }
+}
+
+// --multi: отправить gifts разных номиналов
+async function handleSendMultiGifts(
+  msg: TgMessage,
+  user: { tgId: string; username: string | null; firstName: string | null },
+  target: { tgId: string; username: string | null; firstName: string | null },
+  amounts: number[],
+  opts: { anonymous: boolean; giftText: string | null; silentNotify: boolean; dryRun: boolean }
+) {
+  const displayName = target.username ? `@${target.username}` : `tg:${target.tgId}`
+
+  if (opts.dryRun) {
+    await send(msg.chat.id,
+      [
+        `🔍 **Предпросмотр --multi:**`,
+        `👤 Юзер: ${displayName}`,
+        ``,
+        `Будет отправлено: ${amounts.map(a => `${a}⭐`).join(', ')}`,
+        ``,
+        `⚠️ Убери --dry-run для отправки.`,
+      ].join('\n')
+    )
+    return
+  }
+
+  await send(msg.chat.id, `📦 Отправляю ${amounts.length} разных gifts юзеру ${displayName}...`)
+
+  let totalSent = 0
+  let totalFailed = 0
+  const details: string[] = []
+
+  for (const amount of amounts) {
+    const result = await sendGiftsWithFlags(target.tgId, amount, 1, opts)
+    if (result.sent > 0) {
+      totalSent++
+      details.push(`✅ ${amount}⭐`)
+    } else {
+      totalFailed++
+      details.push(`❌ ${amount}⭐`)
+    }
+  }
+
+  const flagsInfo = buildFlagsInfo(opts)
+  await send(msg.chat.id,
+    [
+      `📦 **Результат --multi:**`,
+      `👤 Юзер: ${displayName}`,
+      `✅ Отправлено: ${totalSent}/${amounts.length}`,
+      `❌ Не удалось: ${totalFailed}`,
+      ``,
+      ...details,
+      ...(flagsInfo.length > 0 ? [``, `🏷 Флаги: ${flagsInfo.join(', ')}`] : []),
+    ].join('\n')
+  )
+
+  if (totalSent > 0 && !opts.silentNotify) {
+    try {
+      const senderName = opts.anonymous ? 'аноним' : (user.username ? `@${user.username}` : (user.firstName || 'админ'))
+      await send(target.tgId, `📦 Вам отправлено ${totalSent} разных gifts от ${senderName}!`)
     } catch {}
   }
 }
